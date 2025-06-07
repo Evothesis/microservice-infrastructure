@@ -1,3 +1,39 @@
+# User-Added
+# Sensitive temporary files
+/tmp/
+*.env.local
+
+# Backup files contain real AWS resources
+backups/
+
+# AWS CLI output
+aws-exports.js
+*.zip
+
+# Deployment artifacts
+*.tar.gz
+
+# Deployment artifacts
+deploy/tmp/
+*.zip
+*.tar.gz
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# AWS
+.aws/
+aws-exports.js
+
+# Logs
+logs/
+*.log
+
+# Prevent Lambda code from being created in wrong location
+deploy/src/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
