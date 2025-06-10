@@ -33,17 +33,11 @@ source "/tmp/${PROJECT_NAME}-${ENVIRONMENT}-s3.env"
 
 echo "⚡ Setting up Lambda functions for $ENVIRONMENT..."
 
-# Debug: Show what PROJECT_ROOT resolves to
-echo "  📁 Project root: $PROJECT_ROOT"
-
 # Create Lambda deployment package
 create_lambda_package() {
     local function_name=$1
     local source_dir="$PROJECT_ROOT/src/lambdas/$function_name"
     local zip_file="/tmp/${function_name}-${ENVIRONMENT}.zip"
-    
-    echo "  📦 Creating deployment package for $function_name..."
-    echo "  📁 Source directory: $source_dir"
     
     # Create temporary directory for packaging
     local temp_dir="/tmp/lambda-package-$function_name"
@@ -92,7 +86,6 @@ def lambda_handler(event, context):
 EOF
         # Copy to the CORRECT source directory
         cp "$temp_dir/lambda_function.py" "$source_dir/"
-        echo "  📄 Created placeholder function in $source_dir"
     fi
     
     # Create zip file
@@ -103,6 +96,7 @@ EOF
     # Cleanup
     rm -rf "$temp_dir"
     
+    # Return zip file path (critical: no echo statements here)
     echo "$zip_file"
 }
 
@@ -114,7 +108,13 @@ deploy_lambda() {
     
     local lambda_function_name="${LAMBDA_PREFIX}-${function_name}-${ENVIRONMENT}"
     
-    local zip_file=$(create_lambda_package "$function_name")
+    echo "  📦 Creating deployment package for $function_name..."
+    
+    # Get zip file path (store in variable to avoid mixing with echo)
+    local zip_file
+    zip_file=$(create_lambda_package "$function_name")
+    
+    echo "  📁 Package created: $zip_file"
     
     # Check if function exists
     if aws lambda get-function --function-name "$lambda_function_name" &>/dev/null; then
@@ -176,14 +176,22 @@ EXPORT_ARN=$(deploy_lambda "export" \
     "Exports processed data to client buckets" \
     "Variables={S3_INTERNAL_BUCKET=$S3_INTERNAL_BUCKET,S3_EXPORT_BUCKET=$S3_EXPORT_BUCKET,CLIENT_CONFIG_TABLE=$CLIENT_CONFIG_TABLE,ENVIRONMENT=$ENVIRONMENT}")
 
+# Deploy S3 archiver function
+echo "  🗄️ Deploying S3 archiver..."
+S3_ARCHIVER_ARN=$(deploy_lambda "s3-archiver" \
+    "Hourly batch export of events to S3" \
+    "Variables={RAW_EVENTS_TABLE=$RAW_EVENTS_TABLE,S3_ARCHIVE_BUCKET=$S3_ARCHIVE_BUCKET,ENVIRONMENT=$ENVIRONMENT}")
+
 # Store function ARNs for other scripts
 cat > "/tmp/${PROJECT_NAME}-${ENVIRONMENT}-lambda.env" << EOF
 export EVENT_COLLECTOR_ARN='$EVENT_COLLECTOR_ARN'
 export ENRICHMENT_ARN='$ENRICHMENT_ARN'
 export EXPORT_ARN='$EXPORT_ARN'
+export S3_ARCHIVER_ARN='$S3_ARCHIVER_ARN'
 export EVENT_COLLECTOR_NAME='${LAMBDA_PREFIX}-event-collector-${ENVIRONMENT}'
 export ENRICHMENT_NAME='${LAMBDA_PREFIX}-enrichment-${ENVIRONMENT}'
 export EXPORT_NAME='${LAMBDA_PREFIX}-export-${ENVIRONMENT}'
+export S3_ARCHIVER_NAME='${LAMBDA_PREFIX}-s3-archiver-${ENVIRONMENT}'
 EOF
 
 echo "✅ Lambda setup complete for $ENVIRONMENT"

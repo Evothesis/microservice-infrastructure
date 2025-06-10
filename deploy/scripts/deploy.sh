@@ -51,6 +51,11 @@ echo "🌐 Setting up API Gateway..."
 bash "$SCRIPT_DIR/setup-api-gateway.sh" "$ENVIRONMENT"
 echo ""
 
+# Add this before the final summary
+echo "⏰ Setting up hourly scheduler..."
+bash "$SCRIPT_DIR/setup-scheduler.sh" "$ENVIRONMENT"
+echo ""
+
 # Load final configuration
 source "/tmp/${PROJECT_NAME}-${ENVIRONMENT}-api.env"
 
