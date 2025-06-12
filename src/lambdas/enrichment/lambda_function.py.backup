@@ -18,7 +18,6 @@ RAW_EVENTS_TABLE = os.environ.get('RAW_EVENTS_TABLE')
 IDENTITIES_TABLE = os.environ.get('IDENTITIES_TABLE')
 SESSIONS_TABLE = os.environ.get('SESSIONS_TABLE')
 ENRICHED_S3_BUCKET = os.environ.get('ENRICHED_S3_BUCKET')
-ENRICHED_EVENTS_TABLE = os.environ.get("ENRICHED_EVENTS_TABLE")
 ENVIRONMENT = os.environ.get('ENVIRONMENT', 'dev')
 
 # Initialize DynamoDB tables
@@ -534,57 +533,89 @@ def calculate_identity_confidence(signals: Dict) -> float:
     confidence = sum(scores[k] * weights[k] for k in scores if k in weights)
     return round(min(1.0, max(0.0, confidence)), 3)
 
-def convert_floats_to_decimal(obj):
-    """Convert float values to Decimal for DynamoDB compatibility"""
-    if isinstance(obj, float):
-        return Decimal(str(obj))
-    elif isinstance(obj, dict):
-        return {key: convert_floats_to_decimal(value) for key, value in obj.items()}
-    elif isinstance(obj, list):
-        return [convert_floats_to_decimal(item) for item in obj]
-    else:
-        return obj
-
 def store_enriched_events(enriched_events: List[Dict]) -> None:
-    """Store enriched events in DynamoDB for hourly batching to S3"""
+    """Store enriched events in S3 organized by site and hour"""
     
-    if not enriched_events:
-        return
+    # Group events by site and hour for efficient storage
+    events_by_site_hour = {}
     
-    enriched_table = dynamodb.Table(ENRICHED_EVENTS_TABLE)
+    for event in enriched_events:
+        site_id = event.get('siteId', 'unknown')
+        timestamp = event.get('timestamp', 0)
+        
+        # Convert timestamp to datetime
+        if isinstance(timestamp, (int, float)):
+            dt = datetime.fromtimestamp(timestamp / 1000, tz=timezone.utc)
+        else:
+            dt = datetime.now(timezone.utc)
+        
+        hour_key = f"{site_id}#{dt.strftime('%Y-%m-%d-%H')}"
+        
+        if hour_key not in events_by_site_hour:
+            events_by_site_hour[hour_key] = []
+        
+        events_by_site_hour[hour_key].append(event)
     
-    try:
-        # Store each enriched event in DynamoDB
-        for event in enriched_events:
-            site_id = event.get('siteId', 'unknown')
-            timestamp = event.get('timestamp', 0)
+    # Store each group in S3
+    for hour_key, events in events_by_site_hour.items():
+        try:
+            site_id, hour_str = hour_key.split('#')
+            clean_site_id = site_id.replace('.', '-').replace('/', '-').lower()
             
-            # Convert timestamp for consistent storage
-            if isinstance(timestamp, (int, float)):
-                timestamp_num = int(timestamp)
-            else:
-                timestamp_num = int(datetime.now(timezone.utc).timestamp() * 1000)
+            # Parse hour string back to datetime for S3 key
+            dt = datetime.strptime(hour_str, '%Y-%m-%d-%H')
             
-            # Prepare DynamoDB item
-            enriched_item = {
-                'site_id': site_id,
-                'timestamp': timestamp_num,
-                'event_id': event.get('eventId', str(uuid.uuid4())),
-                'event_data': event,
-                'created_at': datetime.utcnow().isoformat(),
-                'ttl': int((datetime.utcnow() + timedelta(days=7)).timestamp())  # 7 day TTL
+            # Create S3 key with partitioning
+            s3_key = (
+                f"enriched-events/domain={clean_site_id}/"
+                f"year={dt.year}/month={dt.month:02d}/"
+                f"day={dt.day:02d}/hour={dt.hour:02d}/"
+                f"enriched-{hour_str}-{uuid.uuid4().hex[:8]}.jsonl"
+            )
+            
+            # Convert events to JSONL format
+            jsonl_lines = []
+            for event in events:
+                # Convert Decimal types for JSON serialization
+                event_json = json.dumps(event, default=decimal_default, separators=(',', ':'))
+                jsonl_lines.append(event_json)
+            
+            jsonl_content = '\n'.join(jsonl_lines) + '\n'
+            
+            # Add metadata header
+            metadata = {
+                'enrichment_info': {
+                    'site_id': site_id,
+                    'hour': hour_str,
+                    'event_count': len(events),
+                    'enriched_at': datetime.utcnow().isoformat(),
+                    'environment': ENVIRONMENT,
+                    'enrichment_version': '1.0'
+                }
             }
             
-            # Convert floats to Decimal for DynamoDB
-            enriched_item = convert_floats_to_decimal(enriched_item)
+            final_content = json.dumps(metadata, default=decimal_default) + '\n' + jsonl_content
             
-            # Store in DynamoDB
-            enriched_table.put_item(Item=enriched_item)
-        
-        print(f"Stored {len(enriched_events)} enriched events in DynamoDB for hourly batching")
-        
-    except Exception as e:
-        print(f"Error storing enriched events in DynamoDB: {e}")
+            # Upload to S3
+            s3_client.put_object(
+                Bucket=ENRICHED_S3_BUCKET,
+                Key=s3_key,
+                Body=final_content.encode('utf-8'),
+                ContentType='application/jsonl',
+                Metadata={
+                    'site-id': site_id,
+                    'event-count': str(len(events)),
+                    'hour': hour_str,
+                    'enrichment-version': '1.0',
+                    'environment': ENVIRONMENT
+                }
+            )
+            
+            print(f"Stored {len(events)} enriched events for {site_id} at {s3_key}")
+            
+        except Exception as e:
+            print(f"Error storing enriched events for {hour_key}: {e}")
+
 def decimal_default(obj):
     """Convert Decimal types to float for JSON serialization"""
     if isinstance(obj, Decimal):
